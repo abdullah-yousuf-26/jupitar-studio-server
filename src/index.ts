@@ -1,6 +1,9 @@
 import express from "express";
 import { ObjectId } from "mongodb";
-import { connectToDatabase } from "./db.js";
+import { toNodeHandler } from "better-auth/node";
+
+import { createAuth } from "./auth.js";
+import { client, connectToDatabase } from "./db.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 5000);
@@ -35,10 +38,13 @@ app.get("/api/health", (_request, response) => {
 async function startServer() {
   const database = await connectToDatabase();
   const studios = database.collection("studios");
+  const auth = createAuth(database, client);
 
   console.log(`MongoDB connection OK: ${database.databaseName}`);
 
-  // Keep this named route above /api/studios/:id.
+  app.all("/api/auth/*splat", toNodeHandler(auth));
+
+  // Register named studio routes before the dynamic /:id route.
   app.get("/api/studios/featured", async (_request, response) => {
     try {
       const featuredStudios = await studios
@@ -107,7 +113,6 @@ async function startServer() {
         return;
       }
 
-      // Seeded studios currently have one cover image or a placeholder.
       const gallery =
         Array.isArray(studio.gallery) && studio.gallery.length > 0
           ? studio.gallery
@@ -133,9 +138,8 @@ async function startServer() {
   });
 }
 
-startServer().catch(() => {
-  console.error(
-    "Server startup failed. Check the MongoDB settings in .env and network access in Atlas."
-  );
+startServer().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : "Unknown startup error";
+  console.error("JUPITAR STUDIO server failed to start:", message);
   process.exit(1);
 });

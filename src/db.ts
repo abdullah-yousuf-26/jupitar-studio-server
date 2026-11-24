@@ -8,7 +8,7 @@ if (!uri || !databaseName) {
   throw new Error("Set MONGODB_URI and MONGODB_DB_NAME in the server .env file.");
 }
 
-const client = new MongoClient(uri, {
+export const client = new MongoClient(uri, {
   serverSelectionTimeoutMS: 10000,
 });
 
