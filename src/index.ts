@@ -4,6 +4,7 @@ import { toNodeHandler } from "better-auth/node";
 
 import { createAuth } from "./auth.js";
 import { client, connectToDatabase } from "./db.js";
+import { createHostRoutes } from "./host-routes.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 5000);
@@ -43,6 +44,7 @@ async function startServer() {
   console.log(`MongoDB connection OK: ${database.databaseName}`);
 
   app.all("/api/auth/*splat", toNodeHandler(auth));
+  app.use("/api", createHostRoutes(database, auth));
 
   // Register named studio routes before the dynamic /:id route.
   app.get("/api/studios/featured", async (_request, response) => {
