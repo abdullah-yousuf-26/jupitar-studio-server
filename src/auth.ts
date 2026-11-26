@@ -7,9 +7,15 @@ import type { Db, MongoClient } from "mongodb";
 export function createAuth(database: Db, client: MongoClient) {
   const baseURL = process.env.BETTER_AUTH_URL;
   const secret = process.env.BETTER_AUTH_SECRET;
+  const googleClientId = process.env.GOOGLE_CLIENT_ID;
+  const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
 
   if (!baseURL || !secret) {
     throw new Error("Set BETTER_AUTH_URL and BETTER_AUTH_SECRET in the server .env.");
+  }
+
+  if (!googleClientId || !googleClientSecret) {
+    throw new Error("Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the server .env.");
   }
 
   return betterAuth({
@@ -17,6 +23,13 @@ export function createAuth(database: Db, client: MongoClient) {
     baseURL,
     secret,
     database: mongodbAdapter(database, { client }),
+
+    socialProviders: {
+      google: {
+        clientId: googleClientId,
+        clientSecret: googleClientSecret,
+      },
+    },
 
     emailAndPassword: {
       enabled: true,
@@ -27,9 +40,7 @@ export function createAuth(database: Db, client: MongoClient) {
 
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
-        if (ctx.path !== "/sign-up/email") {
-          return;
-        }
+        if (ctx.path !== "/sign-up/email") return;
 
         const password = ctx.body?.password;
 
