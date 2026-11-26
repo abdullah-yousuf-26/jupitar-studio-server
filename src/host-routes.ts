@@ -245,6 +245,234 @@ export function createHostRoutes(database: Db, auth: Auth) {
 
     res.sendStatus(204);
   });
+  const bookings = database.collection("bookings");
+  const jsonBody = express.json({ limit: "32kb" });
+  const validId = z.string().regex(/^[a-f0-9]{24}$/i);
+
+  // Load one studio for its owner's edit form.
+  router.get("/host/listings/:id", requireSession, async (req, res) => {
+    const id = validId.safeParse(req.params.id);
+    const host = res.locals.host;
+
+    if (!id.success) {
+      res.status(400).json({ message: "Invalid studio ID." });
+      return;
+    }
+
+    const studio = await studios.findOne(
+      { _id: new ObjectId(id.data), ownerId: host.id },
+      {
+        projection: {
+          title: 1,
+          category: 1,
+          hourlyRate: 1,
+          securityDeposit: 1,
+          maxCapacity: 1,
+          location: 1,
+          overview: 1,
+          amenities: 1,
+          imageUrl: 1,
+        },
+      },
+    );
+
+    if (!studio) {
+      res.status(404).json({ message: "Studio not found in your listings." });
+      return;
+    }
+
+    res.set("Cache-Control", "no-store").json({
+      studio,
+      host: { name: host.name, email: host.email },
+    });
+  });
+
+  // Reuse the same field validation as Add New Studio.
+  // The owner can save other changes without uploading a new photo.
+  const editStudioInput = studioInput
+    .omit({ requestId: true })
+    .partial({ imageUrl: true });
+
+  router.patch("/studios/:id", ...protectWrite, jsonBody, async (req, res) => {
+    const id = validId.safeParse(req.params.id);
+    const input = editStudioInput.safeParse(req.body);
+
+    if (!id.success) {
+      res.status(400).json({ message: "Invalid studio ID." });
+      return;
+    }
+
+    if (!input.success) {
+      const issue = input.error.issues[0];
+      res.status(400).json({
+        message: `${issue.path.join(".")}: ${issue.message}`,
+      });
+      return;
+    }
+
+    const filter = {
+      _id: new ObjectId(id.data),
+      ownerId: res.locals.host.id,
+    };
+
+    const { imageUrl, ...fields } = input.data;
+
+    // Replace the cover and preserve any additional gallery photos.
+    const result = imageUrl
+      ? await studios.updateOne(filter, [
+          {
+            $set: {
+              ...Object.fromEntries(
+                Object.entries(fields).map(([key, value]) => [
+                  key,
+                  { $literal: value },
+                ]),
+              ),
+              imageUrl: { $literal: imageUrl },
+              gallery: {
+                $concatArrays: [
+                  [imageUrl],
+                  { $slice: [{ $ifNull: ["$gallery", []] }, 1, 2147483647] },
+                ],
+              },
+            },
+          },
+        ])
+      : await studios.updateOne(filter, { $set: fields });
+
+    if (result.matchedCount === 0) {
+      res.status(404).json({ message: "Studio not found in your listings." });
+      return;
+    }
+
+    res.sendStatus(204);
+  });
+
+  const bookingInput = z.object({
+    studioId: validId,
+    start: z.string().datetime(),
+    end: z.string().datetime(),
+    requestId: z.string().uuid(),
+  });
+
+  router.post("/bookings", ...protectWrite, jsonBody, async (req, res) => {
+    const input = bookingInput.safeParse(req.body);
+
+    if (!input.success) {
+      res.status(400).json({ message: "Choose a studio and valid booking times." });
+      return;
+    }
+
+    const userId = res.locals.host.id;
+    const studioId = new ObjectId(input.data.studioId);
+    const start = new Date(input.data.start);
+    const end = new Date(input.data.end);
+
+    // A retry of the same submission uses the same MongoDB document ID.
+    const bookingId = new ObjectId(
+      createHash("sha256")
+        .update(`booking:${userId}:${input.data.requestId}`)
+        .digest("hex")
+        .slice(0, 24),
+    );
+
+    if (await bookings.findOne({ _id: bookingId, userId })) {
+      res.status(200).json({ id: bookingId });
+      return;
+    }
+
+    if (start.getTime() <= Date.now() || end <= start) {
+      res.status(400).json({
+        message: "Choose a future start time and an end time after it.",
+      });
+      return;
+    }
+
+    const studio = await studios.findOne(
+      { _id: studioId },
+      { projection: { title: 1, hourlyRate: 1 } },
+    );
+
+    if (!studio) {
+      res.status(404).json({ message: "Studio not found." });
+      return;
+    }
+
+    const overlap = await bookings.findOne({
+      studioId,
+      status: "Confirmed",
+      start: { $lt: end },
+      end: { $gt: start },
+    });
+
+    if (overlap) {
+      res.status(409).json({
+        message: "This studio has a confirmed booking during those hours.",
+      });
+      return;
+    }
+
+    const hours = (end.getTime() - start.getTime()) / 3_600_000;
+    const total = Math.round(hours * studio.hourlyRate * 100) / 100;
+
+    await bookings.updateOne(
+      { _id: bookingId },
+      {
+        $setOnInsert: {
+          userId,
+          studioId,
+          studioTitle: studio.title,
+          hourlyRate: studio.hourlyRate,
+          start,
+          end,
+          total,
+          status: "Pending",
+          createdAt: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+
+    res.status(201).json({ id: bookingId });
+  });
+
+  router.get("/bookings/mine", requireSession, async (_req, res) => {
+    const rows = await bookings
+      .find({ userId: res.locals.host.id })
+      .project({ studioTitle: 1, start: 1, end: 1, total: 1, status: 1 })
+      .sort({ start: -1 })
+      .toArray();
+
+    res.set("Cache-Control", "no-store").json(rows);
+  });
+
+  router.patch("/bookings/:id/cancel", ...protectWrite, async (req, res) => {
+    const id = validId.safeParse(req.params.id);
+
+    if (!id.success) {
+      res.status(400).json({ message: "Invalid booking ID." });
+      return;
+    }
+
+    const result = await bookings.updateOne(
+      {
+        _id: new ObjectId(id.data),
+        userId: res.locals.host.id,
+        status: "Pending",
+      },
+      { $set: { status: "Cancelled" } },
+    );
+
+    if (!result.matchedCount) {
+      res.status(409).json({
+        message: "Only your pending bookings can be cancelled. Refresh the page.",
+      });
+      return;
+    }
+
+    res.sendStatus(204);
+  });
+
 
   return router;
 }
