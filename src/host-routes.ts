@@ -350,6 +350,16 @@ export function createHostRoutes(database: Db, auth: Auth) {
 
   const bookingInput = z.object({
     studioId: validId,
+    contactNumber: z.string()
+      .trim()
+      .max(32)
+      .transform(value => value.replace(/[\s()-]/g, ""))
+      .pipe(
+        z.string().regex(
+          /^(?:0\d{9,10}|\+[1-9]\d{6,14})$/,
+          "Enter a local contact number or an international number beginning with +.",
+        ),
+      ),
     start: z.string().datetime(),
     end: z.string().datetime(),
     requestId: z.string().uuid(),
@@ -359,7 +369,15 @@ export function createHostRoutes(database: Db, auth: Auth) {
     const input = bookingInput.safeParse(req.body);
 
     if (!input.success) {
-      res.status(400).json({ message: "Choose a studio and valid booking times." });
+      const phoneIssue = input.error.issues.find(
+        issue => issue.path[0] === "contactNumber",
+      );
+
+      res.status(400).json({
+        message: phoneIssue
+          ? "Enter a valid contact number, such as 01712345678 or +8801712345678."
+          : "Choose a studio, booking date, start hour, and end hour.",
+      });
       return;
     }
 
@@ -381,9 +399,20 @@ export function createHostRoutes(database: Db, auth: Auth) {
       return;
     }
 
-    if (start.getTime() <= Date.now() || end <= start) {
+    const durationMs = end.getTime() - start.getTime();
+    const hourMs = 3_600_000;
+
+    // Bangladesh is UTC+06:00, so a whole local hour is also a whole UTC hour.
+    if (start.getTime() % hourMs !== 0 || end.getTime() % hourMs !== 0) {
       res.status(400).json({
-        message: "Choose a future start time and an end time after it.",
+        message: "Choose whole hours, such as 2 PM to 5 PM.",
+      });
+      return;
+    }
+
+    if (start.getTime() <= Date.now() || durationMs <= 0 || durationMs >= 24 * hourMs) {
+      res.status(400).json({
+        message: "Choose a future session between 1 and 23 hours long.",
       });
       return;
     }
@@ -422,6 +451,7 @@ export function createHostRoutes(database: Db, auth: Auth) {
           userId,
           studioId,
           studioTitle: studio.title,
+          contactNumber: input.data.contactNumber,
           hourlyRate: studio.hourlyRate,
           start,
           end,
@@ -439,7 +469,7 @@ export function createHostRoutes(database: Db, auth: Auth) {
   router.get("/bookings/mine", requireSession, async (_req, res) => {
     const rows = await bookings
       .find({ userId: res.locals.host.id })
-      .project({ studioTitle: 1, start: 1, end: 1, total: 1, status: 1 })
+            .project({ studioTitle: 1, contactNumber: 1, start: 1, end: 1, total: 1, status: 1 })
       .sort({ start: -1 })
       .toArray();
 
